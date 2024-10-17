@@ -1,0 +1,148 @@
+#!/bin/bash
+#SBATCH --export=NONE               # do not export current env to the job
+#SBATCH --job-name=fp_wf_1.0        # job name
+#SBATCH --time=04:00:00             # max job run time dd-hh:mm:ss
+#SBATCH --ntasks-per-node=1         # tasks (commands) per compute node
+#SBATCH --cpus-per-task=48          # CPUs (threads) per command
+#SBATCH --mem=360G                  # total memory per node
+#SBATCH --output=stdout.%x.%j       # save stdout to file
+#SBATCH --error=stderr.%x.%j        # save stderr to file
+
+#### DEFAULT PARAMETERS ####
+input_dir="input_sample"
+trim5_R1=20
+trim5_R2=20 
+host_db="GRCm39/GRCm39"
+############################
+
+#### EXAMPLE USAGE
+# $sbatch my_script.sh -i my_input_directory -t 15 -u 15 -d my_host_db
+# Default trim and db
+# $sbatch fp_wf.job -i $INPUTDIR
+###
+
+# Parse command-line arguments
+while getopts "i:t:u:d:" opt; do
+  case $opt in
+    i) input_dir="$OPTARG" ;;        # Input directory
+    t) trim5_R1="$OPTARG" ;;         # Trim 5' for R1
+    u) trim5_R2="$OPTARG" ;;         # Trim 5' for R2
+    d) host_db="$OPTARG" ;;          # Host database for Bowtie2
+    \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
+  esac
+done
+
+echo "Input directory: $input_dir"
+echo "Trim5 R1: $trim5_R1"
+echo "Trim5 R2: $trim5_R2"
+echo "Host DB: $host_db"
+
+#### MAIN SCRIPT ####
+
+echo "Step 1: Raw read QC"
+
+module load FastQC/0.12.1-Java-11
+
+mkdir -p out_fastqc
+
+for x in ${input_dir}/*.fastq.gz ; do fastqc -o out_fastqc "$x" ; done
+
+echo "Raw fastqc reports generated..."
+
+##### Generate multiqc report ####
+module load GCC/12.2.0  OpenMPI/4.1.4
+module load MultiQC/1.14
+
+mkdir -p out_fastqc/out_multiqc
+
+multiqc out_fastqc/ --outdir out_fastqc/out_multiqc
+
+module purge
+
+echo "Raw multiqc report generated..."
+
+echo "Step 2: Trimming"
+echo "Triming Parameters: trim5_R1 ${trim5_R1} trim5_R2 ${trim5_R2}"
+
+module load GCCcore/11.3.0
+module load cutadapt/4.2
+
+mkdir -p trimmed
+
+for forward in ${input_dir}/*_R1.fastq.gz; do
+    reverse=${forward/_R1.fastq.gz/_R2.fastq.gz}
+    sample_name=$(basename ${forward} _R1.fastq.gz)
+    cutadapt -j ${SLURM_CPUS_PER_TASK} -u ${trim5_R1} -U ${trim5_R2} -o "trimmed/${sample_name}_R1_trimmed.fastq.gz" -p "trimmed/${sample_name}_R2_trimmed.fastq.gz" ${forward} ${reverse}
+done
+
+module purge
+
+echo "Trimming Complete..."
+
+echo "Post trim qc..."
+
+module load FastQC/0.12.1-Java-11
+
+mkdir -p out_fastqc_trimmed
+
+for x in trimmed/* ; do fastqc -o out_fastqc_trimmed "$x" ; done
+
+module load GCC/12.2.0  OpenMPI/4.1.4
+module load MultiQC/1.14
+
+mkdir -p out_fastqc_trimmed/out_multiqc_trimmed
+
+multiqc out_fastqc_trimmed/ --outdir out_fastqc_trimmed/out_multiqc_trimmed
+
+module purge
+
+echo "QC and Trim Complete"
+
+echo "Depleting host reads..."
+
+module load GCC/12.2.0
+module load Bowtie2/2.5.1
+
+mkdir -p out_bt2
+
+for forward in trimmed/*_R1_trimmed.fastq.gz; do
+    reverse=${forward/_R1_trimmed.fastq.gz/_R2_trimmed.fastq.gz}
+    sample_name=$(basename ${forward} _R1_trimmed.fastq.gz)
+    bowtie2 -x ${host_db} -1 ${forward} -2 ${reverse} --un-conc "out_bt2/${sample_name}_depletedHost_reads.fastq" -S "out_bt2/${sample_name}_Host_reads.sam"
+    wait
+done
+
+module purge
+
+mkdir -p fastq_combine
+
+for forward in out_bt2/*.1.fastq; do
+    reverse=${forward/.1.fastq/.2.fastq}
+    sample_name=$(basename ${forward} _depletedHost_reads.1.fastq)
+    cat ${forward} ${reverse} > fastq_combine/${sample_name}_hb_cb.fastq 
+done
+
+module load GCC/11.2.0  OpenMPI/4.1.1
+module load HUMAnN/3.8
+
+mkdir -p out_humann
+
+for input_fastq in fastq_combine/*_hb_cb.fastq; do
+    sample_name=$(basename "${input_fastq}" _hb_cb.fastq)
+    sample_output_dir="out_humann/${sample_name}"
+    mkdir -p "${sample_output_dir}"
+    humann --input "${input_fastq}" --output "${sample_output_dir}" --threads "${SLURM_CPUS_PER_TASK}"
+    
+    # Remove the humann_temp directory
+    input_basename=$(basename "${input_fastq}" .fastq)
+    temp_dir="${sample_output_dir}/${input_basename}_humann_temp"
+    if [ -d "$temp_dir" ]; then
+        rm -r "$temp_dir"
+        echo "Removed temporary directory $temp_dir"
+    else
+        echo "No temporary directory found at $temp_dir"
+    fi
+done
+
+echo "All profiles written, pipeline complete...hopefully"
+
