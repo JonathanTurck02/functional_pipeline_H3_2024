@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH --export=NONE               # do not export current env to the job
+#SBATCH --job-name=fin_process      # job name
+#SBATCH --time=02:00:00             # max job run time dd-hh:mm:ss
+#SBATCH --ntasks-per-node=1         # tasks (commands) per compute node
+#SBATCH --cpus-per-task=24          # CPUs (threads) per command
+#SBATCH --mem=360G                  # total memory per node
+#SBATCH --output=stdout.%x.%j       # save stdout to file
+#SBATCH --error=stderr.%x.%j        # save stderr to file
+
+#### DEPLETE HOST READS ####
+echo "Depleting host reads..."
+
+#input_dir="trimmed" # dont think I need to reassign this here
+host_db="bt2_index/GRCm39/GRCm39"
+
+module load GCC/12.2.0
+module load Bowtie2/2.5.1
+
+mkdir -p out_bt2
+
+for forward in trimmed/*_R1_trimmed.fastq.gz; do
+    # Automatically find the matching reverse file
+    reverse=${forward/_R1_trimmed.fastq.gz/_R2_trimmed.fastq.gz}
+
+    # Extract the sample name (without the _R1_trimmed.fastq.gz part)
+    sample_name=$(basename ${forward} _R1_trimmed.fastq.gz)
+
+    # Run Bowtie2 with the correct input and output
+    bowtie2 -x bt2_index/GRCm39/GRCm39 -1 ${forward} -2 ${reverse} --un-conc "out_bt2/${sample_name}_depletedHost_reads.fastq" -S "out_bt2/${sample_name}_Host_reads.sam"
+
+    # Wait for Bowtie2 to finish before moving to the next sample
+    wait
+done
+
+
+module purge
+
+#### CAT FILES ####
+
+mkdir -p fastq_combine
+
+for forward in out_bt2/*.fastq.1; do
+    reverse=${forward/fastq.1/fastq.2}
+
+    sample_name=$(basename ${forward} _depletedHost_reads.fastq.1)
+
+    cat ${forward} ${reverse} > fastq_combine/${sample_name}_hb_cb.fastq 
+done
+
+#### RUN HUMANN3 ####
+
+mkdir -p out_humann
+
+# Loop over each FASTQ file in the fastq_combine directory
+for input_fastq in fastq_combine/*_hb_cb.fastq; do
+    # Extract the sample name by removing the suffix
+    sample_name=$(basename "${input_fastq}" _hb_cb.fastq)
+    
+    # Create an output directory for each sample
+    sample_output_dir="out_humann/${sample_name}"
+    mkdir -p "${sample_output_dir}"
+    
+    # Run HUMAnN on the input FASTQ file
+    humann --input "${input_fastq}" \
+           --output "${sample_output_dir}" \
+           --threads "${SLURM_CPUS_PER_TASK}"
+done
+
+echo "WAR IS OVER"
