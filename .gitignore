@@ -1,0 +1,10 @@
+cat_paired_fq.sh
+cutadapt_1016.sh
+deplete_host_reads.sh
+exp_notes.md
+fp_wf_1.0.job
+help.sh
+last_part_wf.job
+*.html
+QC.sh
+single_deplete.sh
