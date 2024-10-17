@@ -8,47 +8,14 @@
 #SBATCH --output=stdout.%x.%j       # save stdout to file
 #SBATCH --error=stderr.%x.%j        # save stderr to file
 
-#### DEPLETE HOST READS ####
-echo "Depleting host reads..."
-
-#input_dir="trimmed" # dont think I need to reassign this here
-host_db="bt2_index/GRCm39/GRCm39"
-
-module load GCC/12.2.0
-module load Bowtie2/2.5.1
-
-mkdir -p out_bt2
-
-for forward in trimmed/*_R1_trimmed.fastq.gz; do
-    # Automatically find the matching reverse file
-    reverse=${forward/_R1_trimmed.fastq.gz/_R2_trimmed.fastq.gz}
-
-    # Extract the sample name (without the _R1_trimmed.fastq.gz part)
-    sample_name=$(basename ${forward} _R1_trimmed.fastq.gz)
-
-    # Run Bowtie2 with the correct input and output
-    bowtie2 -x bt2_index/GRCm39/GRCm39 -1 ${forward} -2 ${reverse} --un-conc "out_bt2/${sample_name}_depletedHost_reads.fastq" -S "out_bt2/${sample_name}_Host_reads.sam"
-
-    # Wait for Bowtie2 to finish before moving to the next sample
-    wait
-done
 
 
-module purge
 
-#### CAT FILES ####
-
-mkdir -p fastq_combine
-
-for forward in out_bt2/*.fastq.1; do
-    reverse=${forward/fastq.1/fastq.2}
-
-    sample_name=$(basename ${forward} _depletedHost_reads.fastq.1)
-
-    cat ${forward} ${reverse} > fastq_combine/${sample_name}_hb_cb.fastq 
-done
 
 #### RUN HUMANN3 ####
+
+module load GCC/11.2.0  OpenMPI/4.1.1
+module load HUMAnN/3.8
 
 mkdir -p out_humann
 

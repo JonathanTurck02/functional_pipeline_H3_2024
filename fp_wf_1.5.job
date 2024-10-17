@@ -8,14 +8,36 @@
 #SBATCH --output=stdout.%x.%j       # save stdout to file
 #SBATCH --error=stderr.%x.%j        # save stderr to file
 
-#### PARAMETERS ####
+#### DEFAULT PARAMETERS ####
 input_dir="input_sample"
 trim5_R1=20
 trim5_R2=20 
-####################
+host_db="GRCm39/GRCm39"
+############################
 
+#### EXAMPLE USAGE
+# $sbatch my_script.sh -i my_input_directory -t 15 -u 15 -d my_host_db
+# Default trim and db
+# $sbatch fp_wf.job -i $INPUTDIR
+###
 
-# last update 10.6.2024
+# Parse command-line arguments
+while getopts "i:t:u:d:" opt; do
+  case $opt in
+    i) input_dir="$OPTARG" ;;        # Input directory
+    t) trim5_R1="$OPTARG" ;;         # Trim 5' for R1
+    u) trim5_R2="$OPTARG" ;;         # Trim 5' for R2
+    d) host_db="$OPTARG" ;;          # Host database for Bowtie2
+    \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
+  esac
+done
+
+echo "Input directory: $input_dir"
+echo "Trim5 R1: $trim5_R1"
+echo "Trim5 R2: $trim5_R2"
+echo "Host DB: $host_db"
+
+#### MAIN SCRIPT ####
 
 echo "Step 1: Raw read QC"
 
@@ -47,23 +69,15 @@ module load cutadapt/4.2
 
 mkdir -p trimmed
 
-for forward in input_sample/*_R1.fastq.gz; do
-    # Automatically find the matching reverse file
+for forward in ${input_dir}/*_R1.fastq.gz; do
     reverse=${forward/_R1.fastq.gz/_R2.fastq.gz}
-
-    # Extract the sample name (without the _R1.fastq.gz part)
     sample_name=$(basename ${forward} _R1.fastq.gz)
-
-    # Run cutadapt with threading (-j for threads)
     cutadapt -j ${SLURM_CPUS_PER_TASK} -u ${trim5_R1} -U ${trim5_R2} -o "trimmed/${sample_name}_R1_trimmed.fastq.gz" -p "trimmed/${sample_name}_R2_trimmed.fastq.gz" ${forward} ${reverse}
-
 done
 
 module purge
 
 echo "Trimming Complete..."
-
-# QC on trimmed
 
 echo "Post trim qc..."
 
@@ -84,11 +98,7 @@ module purge
 
 echo "QC and Trim Complete"
 
-#### DEPLETE HOST READS ####
 echo "Depleting host reads..."
-
-#input_dir="trimmed" # dont think I need to reassign this here
-host_db="bt2_index/GRCm39/GRCm39"
 
 module load GCC/12.2.0
 module load Bowtie2/2.5.1
@@ -96,54 +106,32 @@ module load Bowtie2/2.5.1
 mkdir -p out_bt2
 
 for forward in trimmed/*_R1_trimmed.fastq.gz; do
-    # Automatically find the matching reverse file
     reverse=${forward/_R1_trimmed.fastq.gz/_R2_trimmed.fastq.gz}
-
-    # Extract the sample name (without the _R1_trimmed.fastq.gz part)
     sample_name=$(basename ${forward} _R1_trimmed.fastq.gz)
-
-    # Run Bowtie2 with the correct input and output
-    bowtie2 -x bt2_index/GRCm39/GRCm39 -1 ${forward} -2 ${reverse} --un-conc "out_bt2/${sample_name}_depletedHost_reads.fastq" -S "out_bt2/${sample_name}_Host_reads.sam"
-
-    # Wait for Bowtie2 to finish before moving to the next sample
+    bowtie2 -x ${host_db} -1 ${forward} -2 ${reverse} --un-conc "out_bt2/${sample_name}_depletedHost_reads.fastq" -S "out_bt2/${sample_name}_Host_reads.sam"
     wait
 done
 
-
 module purge
-
-#### CAT FILES ####
 
 mkdir -p fastq_combine
 
 for forward in out_bt2/*.1.fastq; do
     reverse=${forward/.1.fastq/.2.fastq}
-
     sample_name=$(basename ${forward} _depletedHost_reads.1.fastq)
-
     cat ${forward} ${reverse} > fastq_combine/${sample_name}_hb_cb.fastq 
 done
-
-#### RUN HUMANN3 ####
 
 module load GCC/11.2.0  OpenMPI/4.1.1
 module load HUMAnN/3.8
 
 mkdir -p out_humann
 
-# Loop over each FASTQ file in the fastq_combine directory
 for input_fastq in fastq_combine/*_hb_cb.fastq; do
-    # Extract the sample name by removing the suffix
     sample_name=$(basename "${input_fastq}" _hb_cb.fastq)
-    
-    # Create an output directory for each sample
     sample_output_dir="out_humann/${sample_name}"
     mkdir -p "${sample_output_dir}"
-    
-    # Run HUMAnN on the input FASTQ file
-    humann --input "${input_fastq}" \
-           --output "${sample_output_dir}" \
-           --threads "${SLURM_CPUS_PER_TASK}"
+    humann --input "${input_fastq}" --output "${sample_output_dir}" --threads "${SLURM_CPUS_PER_TASK}"
 done
 
 echo "All profiles written, pipeline complete...hopefully"
